@@ -1,0 +1,42 @@
+[
+  {
+    "id": "demo-1",
+    "latitude": 29.7604,
+    "longitude": -95.3698,
+    "brightness": 345.2,
+    "confidence": 88,
+    "detected_at": "2026-08-28T02:12:00Z"
+  },
+  {
+    "id": "demo-2",
+    "latitude": 29.7130,
+    "longitude": -95.4010,
+    "brightness": 320.5,
+    "confidence": 74,
+    "detected_at": "2026-08-28T02:12:00Z"
+  },
+  {
+    "id": "demo-3",
+    "latitude": 30.6280,
+    "longitude": -96.3344,
+    "brightness": 365.9,
+    "confidence": 91,
+    "detected_at": "2026-08-28T04:48:00Z"
+  },
+  {
+    "id": "demo-4",
+    "latitude": 29.9012,
+    "longitude": -95.1234,
+    "brightness": 310.0,
+    "confidence": 65,
+    "detected_at": "2026-08-27T22:00:00Z"
+  },
+  {
+    "id": "demo-5",
+    "latitude": 31.2000,
+    "longitude": -97.5000,
+    "brightness": 300.1,
+    "confidence": 55,
+    "detected_at": "2026-08-27T20:30:00Z"
+  }
+]
