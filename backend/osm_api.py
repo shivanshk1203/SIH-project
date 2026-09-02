@@ -118,9 +118,6 @@ def _tags_to_category(tags):
     return None
 
 
-_FACILITY_CACHE = {}
-
-
 def get_nearby_facilities(latitude, longitude, radius=SEARCH_RADIUS_METERS):
     """
     Returns a list of nearby land-use features, each categorized:
@@ -138,15 +135,10 @@ def get_nearby_facilities(latitude, longitude, radius=SEARCH_RADIUS_METERS):
     Sorted isn't done here (detection.py decides "nearest" using real
     distance), this just returns everything found within `radius`.
     """
-    cache_key = (round(latitude, 2), round(longitude, 2), radius)
-    if cache_key in _FACILITY_CACHE:
-        return _FACILITY_CACHE[cache_key]
-
     query = _build_query(latitude, longitude, radius)
     data = _query_overpass(query)
 
     if data is None:
-        _FACILITY_CACHE[cache_key] = []
         return []
 
     facilities = []
@@ -173,7 +165,6 @@ def get_nearby_facilities(latitude, longitude, radius=SEARCH_RADIUS_METERS):
             "longitude": lon,
         })
 
-    _FACILITY_CACHE[cache_key] = facilities
     return facilities
 
 

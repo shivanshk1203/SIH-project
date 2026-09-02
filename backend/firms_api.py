@@ -15,10 +15,13 @@ import csv
 import io
 import json
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Area we are watching (demo area: part of Texas, USA).
 # In a real system this could be user-selected on the map.
-DEMO_AREA = "-98,28,-94,32"  # west, south, east, north (longitude/latitude box)
+DEFAULT_AREA = "-106,25,-93,37"  # west, south, east, north (longitude/latitude box)
 
 SAMPLE_DATA_PATH = os.path.join(os.path.dirname(__file__), "sample_hotspots.json")
 
@@ -50,9 +53,9 @@ def get_hotspots():
     except Exception as error:
         # If the real API call fails for any reason (network, bad key, etc.)
         # we don't want the whole app to crash. Fall back to sample data.
-        print(f"[firms_api] Could not fetch real FIRMS data, using sample data. Reason: {error}")
-        return _load_sample_data()
-
+        print(f"[firms_api] NASA FIRMS request failed: {error}")
+    raise
+       
 
 def _fetch_real_firms_data(api_key):
     """Calls the real NASA FIRMS API and converts the CSV response into our format."""
@@ -60,7 +63,7 @@ def _fetch_real_firms_data(api_key):
     # FIRMS provides data as CSV. We use the VIIRS 375m sensor, last 1 day.
     url = (
         f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/"
-        f"{api_key}/VIIRS_SNPP_NRT/{DEMO_AREA}/1"
+        f"{api_key}/VIIRS_SNPP_NRT/{DEFAULT_AREA}/2"
     )
 
     response = requests.get(url, timeout=15)

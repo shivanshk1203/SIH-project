@@ -63,18 +63,11 @@ def get_classified_hotspots():
     results = []
     facilities_by_key = {}  # dedupe facilities across overlapping searches
 
-    from concurrent.futures import ThreadPoolExecutor
-
-    def process_hotspot(hotspot):
+    for hotspot in hotspots:
         facilities = osm_api.get_nearby_facilities(hotspot["latitude"], hotspot["longitude"])
         nearest_facility, distance = detection.find_nearest_facility(hotspot, facilities)
         classification_result = detection.classify_hotspot(hotspot, nearest_facility, distance)
-        return hotspot, facilities, nearest_facility, distance, classification_result
 
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        processed_items = list(executor.map(process_hotspot, hotspots))
-
-    for hotspot, facilities, nearest_facility, distance, classification_result in processed_items:
         for facility in facilities:
             key = (facility["name"], round(facility["latitude"], 5), round(facility["longitude"], 5))
             facilities_by_key[key] = facility
