@@ -26,6 +26,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>("dashboard");
   const [events, setEvents] = useState<ThermalEvent[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<ThermalEvent | null>(null);
+  const [explicitMapTargetId, setExplicitMapTargetId] = useState<string | null>(null);
   const [alerts, setAlerts] = useState<OperationalAlert[]>(MOCK_ACTIVE_ALERTS);
   const [facilities, setFacilities] = useState<FacilityProfile[]>(MOCK_FACILITY_PROFILES);
 
@@ -284,6 +285,15 @@ export default function App() {
   }, [dayRange, loadHotspots]);
 
   // Interconnected Navigation Handlers
+  const handleTabChange = (tab: NavTab) => {
+    if (tab === "map") {
+      // Direct navigation to Thermal Map MUST start with NO selection
+      setExplicitMapTargetId(null);
+      setSelectedEvent(null);
+    }
+    setActiveTab(tab);
+  };
+
   const handleViewIncident = (event: ThermalEvent) => {
     setSelectedEvent(event);
     setActiveTab("incident");
@@ -310,7 +320,7 @@ export default function App() {
       {/* 1. Persistent Mission Control Sidebar (7 Items) */}
       <SidebarNav
         activeTab={activeTab}
-        onTabChange={setActiveTab}
+        onTabChange={handleTabChange}
         criticalAlertCount={alerts.filter((a) => a.severity === "CRITICAL" || a.severity === "HIGH").length}
         unresolvedCount={4}
       />
@@ -342,15 +352,23 @@ export default function App() {
               onAnalyzeEvent={handleAnalyzeEvent}
               onNavigateToAlerts={() => setActiveTab("alerts")}
               onNavigateToIncidents={() => setActiveTab("incident")}
-              onNavigateToMap={() => setActiveTab("map")}
+              onNavigateToMap={() => {
+                setExplicitMapTargetId(null);
+                setSelectedEvent(null);
+                setActiveTab("map");
+              }}
+              onNavigateToClassification={() => setActiveTab("classification")}
             />
           )}
 
           {activeTab === "map" && (
             <ThermalMapPage
               events={events}
-              selectedEventId={selectedEvent?.id}
-              onSelectEvent={handleSelectEvent}
+              selectedEventId={explicitMapTargetId || undefined}
+              onSelectEvent={(ev) => {
+                handleSelectEvent(ev);
+                setExplicitMapTargetId(ev ? ev.id : null);
+              }}
               onViewIncident={handleViewIncident}
               onAnalyzeEvent={handleAnalyzeEvent}
             />
@@ -363,7 +381,13 @@ export default function App() {
               onSelectEvent={handleSelectEvent}
               onViewIncident={handleViewIncident}
               onNavigateToMap={(ev) => {
-                if (ev) handleSelectEvent(ev);
+                if (ev) {
+                  setExplicitMapTargetId(ev.id);
+                  handleSelectEvent(ev);
+                } else {
+                  setExplicitMapTargetId(null);
+                  handleSelectEvent(null);
+                }
                 setActiveTab("map");
               }}
               lastUpdatedTime={lastUpdatedTime}
@@ -375,7 +399,11 @@ export default function App() {
             <IncidentInvestigationPage
               incident={selectedEvent || events[0] || PRIMARY_INCIDENT}
               onNavigateToReports={() => setActiveTab("reports")}
-              onNavigateToMap={() => setActiveTab("map")}
+              onNavigateToMap={() => {
+                setExplicitMapTargetId(null);
+                setSelectedEvent(null);
+                setActiveTab("map");
+              }}
             />
           )}
 

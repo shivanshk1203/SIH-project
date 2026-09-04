@@ -19,6 +19,7 @@ interface DashboardPageProps {
   onNavigateToAlerts?: () => void;
   onNavigateToIncidents?: () => void;
   onNavigateToMap?: () => void;
+  onNavigateToClassification?: () => void;
 }
 
 function formatCompactId(id: string): string {
@@ -40,6 +41,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
   onNavigateToMap,
   onNavigateToAlerts,
   onNavigateToIncidents,
+  onNavigateToClassification,
 }) => {
   // ============================================================================
   // 1. SHARED SINGLE SOURCE OF TRUTH (All metrics derive from events & alerts)
@@ -728,7 +730,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
                 cursor: "pointer",
                 padding: 0,
               }}
-              onClick={() => onAnalyzeEvent && events[0] && onAnalyzeEvent(events[0])}
+              onClick={onNavigateToClassification || (() => onAnalyzeEvent && events[0] && onAnalyzeEvent(events[0]))}
             >
               Review Classifications →
             </button>
