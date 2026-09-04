@@ -121,7 +121,7 @@ export default function App() {
               h.nearest_facility ||
               h.spatialEvidence?.matchedFacilityName ||
               h.nearby_facilities?.[0]?.name ||
-              "Unmapped Local Sector";
+              "";
             const facilityType =
               h.spatialEvidence?.infrastructurePattern ||
               h.nearby_facilities?.[0]?.type ||
