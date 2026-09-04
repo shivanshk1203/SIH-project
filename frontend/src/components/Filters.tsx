@@ -10,12 +10,13 @@ export type Filters = {
 };
 
 export const ALL_CLASSIFICATIONS = [
-  "Possible Industrial Fire",
+  "Likely Wildfire",
   "Possible Agricultural Burning",
-  "Possible Mining/Landfill Fire",
-  "Possible Wildfire",
-  "Normal Thermal Source",
-  "Unknown / Needs Investigation",
+  "Likely Industrial Heat",
+  "Mining / Waste Heat",
+  "Controlled Burning",
+  "Possible False Positive / Sensor Anomaly",
+  "Unknown / Needs Verification",
 ];
 
 type FiltersProps = {
@@ -23,12 +24,13 @@ type FiltersProps = {
   onChange: (filters: Filters) => void;
 };
 
-function classDotClass(classification: string) {
-  if (classification === "Possible Industrial Fire") return "dot dot--fire";
-  if (classification === "Possible Agricultural Burning") return "dot dot--farm";
-  if (classification === "Possible Mining/Landfill Fire") return "dot dot--mine";
-  if (classification === "Possible Wildfire") return "dot dot--wildfire";
-  if (classification === "Normal Thermal Source") return "dot dot--normal";
+export function classDotClass(classification: string) {
+  if (classification.includes("Wildfire")) return "dot dot--wildfire";
+  if (classification.includes("Agricultural")) return "dot dot--farm";
+  if (classification.includes("Industrial")) return "dot dot--industrial";
+  if (classification.includes("Mining") || classification.includes("Waste")) return "dot dot--mine";
+  if (classification.includes("Controlled")) return "dot dot--controlled";
+  if (classification.includes("False Positive") || classification.includes("Sensor")) return "dot dot--glint";
   return "dot dot--unknown";
 }
 
@@ -48,7 +50,7 @@ function FiltersPanel({ filters, onChange }: FiltersProps) {
       <input
         type="text"
         className="filters__search"
-        placeholder="Search facility or type…"
+        placeholder="Search city, facility, or type…"
         value={filters.searchText}
         onChange={(e) => onChange({ ...filters, searchText: e.target.value })}
       />
@@ -70,6 +72,23 @@ function FiltersPanel({ filters, onChange }: FiltersProps) {
             onChange={(e) => onChange({ ...filters, dateTo: e.target.value })}
           />
         </label>
+      </div>
+
+      <div className="filters__header-row">
+        <span className="filters__section-label">Classification Filters:</span>
+        <button
+          type="button"
+          className="filters__quick-btn"
+          onClick={() => {
+            if (filters.classifications.length === ALL_CLASSIFICATIONS.length) {
+              onChange({ ...filters, classifications: [] });
+            } else {
+              onChange({ ...filters, classifications: ALL_CLASSIFICATIONS });
+            }
+          }}
+        >
+          {filters.classifications.length === ALL_CLASSIFICATIONS.length ? "Deselect All" : "Show All Active"}
+        </button>
       </div>
 
       <div className="filters__checkboxes">

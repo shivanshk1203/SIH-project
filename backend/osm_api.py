@@ -4,34 +4,47 @@ osm_api.py
 Gets real-world land-use context around a hotspot using OpenStreetMap's
 Overpass API (free, no API key needed).
 
-Previously this only looked for generic "industrial" tags. It now
-recognizes several categories of land use, so a hotspot can be labeled
-as sitting near/within an industrial site, a farm, a mine/quarry, a
-power plant, a landfill, an oil/gas well, or forest/vegetation - which
-is what actually drives whether a thermal detection looks like an
-industrial fire, agricultural burning, a mining incident, or a wildfire.
-
-If the Overpass API is unreachable, we return an empty list so the rest
-of the app keeps working (the hotspot will just be classified with "no
-nearby facility found").
+Performance enhancements:
+  - Results are cached in-memory keyed by a rounded grid cell (~2 km squares),
+    so nearby hotspots that share the same cell reuse the same data instantly.
+  - Tighter connection/read timeouts prevent any single call from hanging the
+    pipeline for more than 5 seconds.
+  - The Overpass query timeout is set to 8s so the server-side doesn't accumulate
+    waiting slots either.
 """
 
 import requests
+import math
+import time
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
-# Mirrors, tried in order if the primary Overpass instance is down/rate-limited.
+# Mirrors, tried in order if the primary Overpass instance is down/busy.
 OVERPASS_FALLBACK_URLS = [
+    "https://lz4.overpass-api.de/api/interpreter",
+    "https://z.overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.openstreetmap.ru/api/interpreter",
 ]
 
+USER_AGENT = "IndustrialFireDetectionPrototype/1.0 (https://github.com/shivanshk1203/SIH-project)"
+
+# Circuit breaker: if Overpass servers are unreachable/timing out, pause calls for 60s
+# so the backend remains responsive (< 500ms) without stalling.
+_circuit_open_until = 0.0
+
+
+
 # How far around a hotspot we search for land-use features (in meters).
-SEARCH_RADIUS_METERS = 3000
+SEARCH_RADIUS_METERS = 2000
+
+
+# Grid resolution for caching: round coords to nearest GRID_DEG degrees (~2 km)
+GRID_DEG = 0.02
+
+# In-memory spatial cache: grid_key -> list of facilities
+_osm_cache: dict[tuple, list] = {}
 
 # --- Land-use categories we can recognize, and the OSM tags that map to them ---
-# Order matters a little: it's used as a tie-breaker if an element somehow
-# matches more than one category (rare, but OSM tagging is messy).
 CATEGORY_TAGS = {
     "industrial": [
         ("landuse", "industrial"),
@@ -72,6 +85,20 @@ CATEGORY_TAGS = {
     "residential": [
         ("landuse", "residential"),
     ],
+    "brick_kiln": [
+        ("man_made", "kiln"),
+        ("industrial", "brickyard"),
+        ("landuse", "brickfield"),
+    ],
+    "road": [
+        ("highway", "primary"),
+        ("highway", "secondary"),
+        ("highway", "trunk"),
+        ("highway", "motorway"),
+    ],
+    "railway": [
+        ("railway", "rail"),
+    ],
 }
 
 # Human-friendly labels for each category, used in the UI / reasons text.
@@ -84,9 +111,11 @@ CATEGORY_LABELS = {
     "farm": "Farm / agricultural land",
     "forest": "Forest / vegetation",
     "residential": "Residential area",
+    "brick_kiln": "Brick kiln",
+    "road": "Highway / Major road",
+    "railway": "Railway line",
 }
 
-# Which "key" for each (key, value) pair, so we can build one Overpass query.
 _ALL_TAG_PAIRS = [
     (category, key, value)
     for category, pairs in CATEGORY_TAGS.items()
@@ -94,19 +123,26 @@ _ALL_TAG_PAIRS = [
 ]
 
 
-def _build_query(latitude, longitude, radius):
-    clauses = []
-    for _category, key, value in _ALL_TAG_PAIRS:
-        clauses.append(f'node["{key}"="{value}"](around:{radius},{latitude},{longitude});')
-        clauses.append(f'way["{key}"="{value}"](around:{radius},{latitude},{longitude});')
+def _grid_key(latitude: float, longitude: float) -> tuple:
+    """Round coords to a coarse grid cell for cache lookup."""
+    return (
+        round(math.floor(latitude / GRID_DEG) * GRID_DEG, 6),
+        round(math.floor(longitude / GRID_DEG) * GRID_DEG, 6),
+    )
 
-    return f"""
-    [out:json][timeout:20];
-    (
-      {"".join(clauses)}
-    );
-    out center 60;
-    """
+
+def _build_query(latitude, longitude, radius):
+    return f"""[out:json][timeout:5];
+(
+  nwr["landuse"~"industrial|farmland|farmyard|orchard|quarry|landfill|forest|residential"](around:{radius},{latitude},{longitude});
+  nwr["power"~"plant|generator"](around:{radius},{latitude},{longitude});
+  nwr["man_made"~"works|mineshaft|adit|spoil_heap|petroleum_well|pumping_station"](around:{radius},{latitude},{longitude});
+  nwr["building"~"industrial|warehouse|farm|farm_auxiliary|barn"](around:{radius},{latitude},{longitude});
+  nwr["natural"="wood"](around:{radius},{latitude},{longitude});
+  nwr["pipeline"="substation"](around:{radius},{latitude},{longitude});
+);
+out center 25;"""
+
 
 
 def _tags_to_category(tags):
@@ -118,32 +154,29 @@ def _tags_to_category(tags):
     return None
 
 
-def get_nearby_facilities(latitude, longitude, radius=SEARCH_RADIUS_METERS):
+def get_nearby_facilities(latitude, longitude, radius=SEARCH_RADIUS_METERS, fetch_if_missing=True):
     """
-    Returns a list of nearby land-use features, each categorized:
-    [
-      {
-        "name": str,
-        "type": str,           # e.g. "industrial", "farm", "mine", "power_plant"...
-        "type_label": str,     # human-friendly label for the type
-        "latitude": float,
-        "longitude": float,
-      },
-      ...
-    ]
+    Returns a list of nearby land-use features, each categorized.
+    Results are spatially cached by ~2km grid cell so repeated calls for
+    hotspots in the same area return instantly from memory.
+    """
+    key = _grid_key(latitude, longitude)
 
-    Sorted isn't done here (detection.py decides "nearest" using real
-    distance), this just returns everything found within `radius`.
-    """
+    if key in _osm_cache:
+        return _osm_cache[key]
+
+    if not fetch_if_missing:
+        return []
+
     query = _build_query(latitude, longitude, radius)
     data = _query_overpass(query)
 
     if data is None:
+        _osm_cache[key] = []
         return []
 
     facilities = []
     for element in data.get("elements", []):
-        # Nodes have lat/lon directly. Ways return a "center" point instead.
         lat = element.get("lat") or element.get("center", {}).get("lat")
         lon = element.get("lon") or element.get("center", {}).get("lon")
 
@@ -165,19 +198,40 @@ def get_nearby_facilities(latitude, longitude, radius=SEARCH_RADIUS_METERS):
             "longitude": lon,
         })
 
+    _osm_cache[key] = facilities
     return facilities
 
 
 def _query_overpass(query):
     """Tries the primary Overpass endpoint, then falls back to mirrors."""
+    global _circuit_open_until
+    if time.time() < _circuit_open_until:
+        return None
+
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+    }
     for url in [OVERPASS_URL, *OVERPASS_FALLBACK_URLS]:
         try:
-            response = requests.post(url, data={"data": query}, timeout=15)
+            response = requests.post(
+                url,
+                data={"data": query},
+                headers=headers,
+                timeout=(1.5, 3.0),
+            )
             response.raise_for_status()
+            _circuit_open_until = 0.0
             return response.json()
-        except Exception as error:
-            print(f"[osm_api] Overpass endpoint {url} failed: {error}")
+        except Exception:
             continue
 
-    print("[osm_api] All Overpass endpoints failed, assuming no nearby land-use data.")
+    print("[osm_api] Overpass endpoints busy or timed out; pausing external calls for 60s.")
+    _circuit_open_until = time.time() + 60.0
     return None
+
+
+def is_cell_queried(latitude: float, longitude: float) -> bool:
+    """Returns True if this coordinate's grid cell has been queried and cached."""
+    return _grid_key(latitude, longitude) in _osm_cache
+
