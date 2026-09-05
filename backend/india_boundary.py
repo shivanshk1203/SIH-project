@@ -105,3 +105,49 @@ def is_inside_india(lat: float, lon: float) -> bool:
 
     # 3. Mainland polygon boundary check
     return _point_in_polygon(lon, lat, INDIA_MAINLAND_POLYGON)
+
+
+if __name__ == "__main__":
+    print("=" * 70)
+    print(" INDIA BOUNDARY GEO-VALIDATION TEST RUN")
+    print("=" * 70)
+
+    test_cases = [
+        # Inside India mainland
+        ("New Delhi", 28.6139, 77.2090, True),
+        ("Mumbai", 19.0760, 72.8777, True),
+        ("Bengaluru", 12.9716, 77.5946, True),
+        ("Kolkata", 22.5726, 88.3639, True),
+        ("Chennai", 13.0827, 80.2707, True),
+        ("Leh, Ladakh", 34.1526, 77.5771, True),
+        ("Guwahati, Assam", 26.1445, 91.7362, True),
+        ("Jaipur, Rajasthan", 26.9124, 75.7873, True),
+        # Island territories
+        ("Port Blair (Andaman & Nicobar)", 11.6234, 92.7265, True),
+        ("Kavaratti (Lakshadweep)", 10.5667, 72.6417, True),
+        # Outside India
+        ("Lahore, Pakistan", 31.5204, 74.3587, False),
+        ("Kathmandu, Nepal", 27.7172, 85.3240, False),
+        ("Dhaka, Bangladesh", 23.8103, 90.4125, False),
+        ("Colombo, Sri Lanka", 6.9271, 79.8612, False),
+        ("Arabian Sea (Open Water)", 15.0000, 65.0000, False),
+        ("Bay of Bengal (Open Water)", 14.0000, 87.0000, False),
+        ("New York, USA", 40.7128, -74.0060, False),
+    ]
+
+    all_passed = True
+    for name, lat, lon, expected in test_cases:
+        result = is_inside_india(lat, lon)
+        status = "PASS" if result == expected else "FAIL"
+        if result != expected:
+            all_passed = False
+        status_label = f"[{status}]"
+        print(f"{status_label:8} {name:32} (lat={lat:7.4f}, lon={lon:7.4f}) -> {str(result):5} (expected {expected})")
+
+    print("=" * 70)
+    if all_passed:
+        print(" SUCCESS: All geographic boundary validation test cases passed!")
+    else:
+        print(" ERROR: Some geographic boundary test cases failed.")
+    print("=" * 70)
+

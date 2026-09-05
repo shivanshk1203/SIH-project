@@ -1,0 +1,6 @@
+# Extra dependencies needed only to run the test suites (not needed to run the server).
+# Install with: pip install -r requirements.txt -r requirements-dev.txt
+-r requirements.txt
+
+# Required by starlette.testclient.TestClient, used in test_india_suite.py
+httpx==0.27.2

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import { ThermalEvent, EventClassification } from "../types/thermal";
 import { ClassificationTag, SeverityBadge } from "../components/common/StatusBadge";
 import {
@@ -47,40 +47,28 @@ export const ThermalMapPage: React.FC<ThermalMapPageProps> = ({
   const [selectedClassification, setSelectedClassification] = useState<string>("ALL");
   const [highSeverityOnly, setHighSeverityOnly] = useState<boolean>(false);
 
-  // Selected hotspot state (compact detail panel) - MUST start at null
+  // Selected hotspot state (compact detail panel) - strictly starts as null
   const [selectedHotspot, setSelectedHotspot] = useState<ThermalEvent | null>(null);
+  const prevSelectedEventIdRef = useRef<string | undefined>(selectedEventId);
 
   // Sync ONLY if selectedEventId changes from explicit external navigation
   useEffect(() => {
-    if (selectedEventId && events.length > 0) {
-      const match = events.find((e) => e.id === selectedEventId);
-      setSelectedHotspot(match || null);
-    } else if (!selectedEventId) {
-      setSelectedHotspot(null);
-    }
-  }, [selectedEventId]);
-
-  // Support explicit URL navigation target (e.g. /thermal-map?eventId=FIRMS-123)
-  useEffect(() => {
-    try {
-      if (typeof window !== "undefined" && window.location) {
-        const params = new URLSearchParams(window.location.search);
-        const urlId = params.get("eventId") || params.get("id");
-        if (urlId && events.length > 0) {
-          const match = events.find((e) => e.id.toLowerCase() === urlId.toLowerCase());
-          if (match) {
-            setSelectedHotspot(match);
-          }
-        }
+    if (selectedEventId !== prevSelectedEventIdRef.current) {
+      prevSelectedEventIdRef.current = selectedEventId;
+      if (selectedEventId && events.length > 0) {
+        const match = events.find((e) => e.id === selectedEventId);
+        setSelectedHotspot(match || null);
+      } else if (!selectedEventId) {
+        setSelectedHotspot(null);
       }
-    } catch {
-      // Ignore URL parse errors
     }
-  }, [events]);
+  }, [selectedEventId, events]);
 
   // Dynamic Filtering
   const filteredEvents = useMemo(() => {
+    if (!Array.isArray(events)) return [];
     return events.filter((ev) => {
+      if (!ev) return false;
       // 1. Classification
       if (selectedClassification !== "ALL") {
         const cat = getCanonicalCategory(ev.classification);
@@ -105,29 +93,17 @@ export const ThermalMapPage: React.FC<ThermalMapPageProps> = ({
     });
   }, [events, selectedClassification, highSeverityOnly, searchText]);
 
-  // When filters or search change: clear selection if selected detection no longer exists in filtered dataset
+  // If the currently selected hotspot is filtered out by the active filters, clear selection cleanly
   useEffect(() => {
-    if (selectedHotspot) {
-      const stillVisible = filteredEvents.some((e) => e.id === selectedHotspot.id);
-      if (!stillVisible) {
-        setSelectedHotspot(null);
-      }
+    if (selectedHotspot && !filteredEvents.some((e) => e.id === selectedHotspot.id)) {
+      setSelectedHotspot(null);
+      if (onSelectEvent) onSelectEvent(null as any);
     }
-  }, [filteredEvents]);
-
-  // When FIRMS data refreshes: preserve selection only if it still exists in updated events, else clear
-  useEffect(() => {
-    if (selectedHotspot) {
-      const stillExists = events.some((e) => e.id === selectedHotspot.id);
-      if (!stillExists) {
-        setSelectedHotspot(null);
-      }
-    }
-  }, [events]);
+  }, [filteredEvents, selectedHotspot, onSelectEvent]);
 
   const handleSelectHotspot = (ev: ThermalEvent | null) => {
     setSelectedHotspot(ev);
-    if (onSelectEvent && ev) onSelectEvent(ev);
+    if (onSelectEvent) onSelectEvent(ev as any);
   };
 
   const hasActiveFilters =
@@ -318,9 +294,9 @@ export const ThermalMapPage: React.FC<ThermalMapPageProps> = ({
         />
 
         {/* ======================================================================
-            DETAIL PANEL: Selected hotspot card OR small neutral empty state
+            COMPACT DETAIL PANEL (Shows ONLY when a detection is clicked)
             ====================================================================== */}
-        {selectedHotspot ? (
+        {selectedHotspot && (
           <div
             style={{
               position: "absolute",
@@ -354,7 +330,7 @@ export const ThermalMapPage: React.FC<ThermalMapPageProps> = ({
                     fontSize: "14px",
                     padding: 0,
                   }}
-                  onClick={() => setSelectedHotspot(null)}
+                  onClick={() => handleSelectHotspot(null)}
                   title="Close details"
                 >
                   ✕
@@ -420,40 +396,6 @@ export const ThermalMapPage: React.FC<ThermalMapPageProps> = ({
               </span>
               Open Incident Investigation →
             </button>
-          </div>
-        ) : (
-          <div
-            style={{
-              position: "absolute",
-              top: "14px",
-              right: "14px",
-              width: "280px",
-              background: "#ffffff",
-              border: "1px solid #cbd5e1",
-              borderRadius: "8px",
-              boxShadow: "0 4px 12px rgba(0,0,0,0.06)",
-              zIndex: 1000,
-              padding: "12px 14px",
-              display: "flex",
-              alignItems: "flex-start",
-              gap: "10px",
-              pointerEvents: "none",
-            }}
-          >
-            <span
-              className="material-symbols-outlined"
-              style={{ fontSize: "18px", color: "#64748b", marginTop: "1px", flexShrink: 0 }}
-            >
-              touch_app
-            </span>
-            <div>
-              <div style={{ fontSize: "12px", fontWeight: 700, color: "#0f172a", marginBottom: "2px" }}>
-                Select a detection
-              </div>
-              <div style={{ fontSize: "11px", color: "#64748b", lineHeight: 1.4 }}>
-                Click a hotspot on the map to inspect its classification, thermal signal, and location context.
-              </div>
-            </div>
           </div>
         )}
       </main>

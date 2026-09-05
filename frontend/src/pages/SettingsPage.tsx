@@ -568,8 +568,8 @@ export const SettingsPage: React.FC = () => {
                       borderRadius: "4px",
                     }}
                   >
-                    <option value="light">CartoDB Light (High Contrast)</option>
-                    <option value="dark">CartoDB Dark Matter</option>
+                    <option value="light">OpenStreetMap Standard</option>
+                    <option value="dark">ESRI World Dark Gray Canvas</option>
                     <option value="satellite">ESRI World Imagery (Satellite)</option>
                   </select>
                 </div>

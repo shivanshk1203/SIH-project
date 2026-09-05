@@ -15,10 +15,9 @@
       href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap"
       rel="stylesheet"
     />
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    />
+    <!-- Leaflet CSS is bundled from node_modules via src/main.tsx (leaflet/dist/leaflet.css),
+         so it is intentionally not duplicated here via CDN. This avoids a redundant network
+         request and a version mismatch risk against the leaflet version in package.json. -->
   </head>
   <body>
     <div id="root"></div>

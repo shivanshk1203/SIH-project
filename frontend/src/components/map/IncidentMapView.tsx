@@ -165,8 +165,11 @@ export const IncidentMapView: React.FC<IncidentMapViewProps> = ({
         refTileLayerRef.current = ref;
       } else {
         const light = L.tileLayer(
-          "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-          { maxZoom: 18, subdomains: "abcd" }
+          "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+          {
+            maxZoom: 19,
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+          }
         );
         light.addTo(map);
         baseTileLayerRef.current = light;

@@ -49,25 +49,28 @@ function formatCompactId(id: string): string {
   return id.length > 14 ? `${id.slice(0, 13)}…` : id;
 }
 
-// Requirement 2 & 8: High-contrast, clean basemaps (Carto Voyager Light + Carto Dark + Esri Satellite)
+// High-contrast, clean basemaps without API key errors
+// Light: Standard OpenStreetMap (no API key required)
+// Dark: Esri World Dark Gray Canvas (no API key required)
+// Satellite: Esri World Imagery (no API key required)
 const MAP_STYLES = {
   light: {
     label: "Light",
     icon: "light_mode",
-    url: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
-    subdomains: "abcd",
+    url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    subdomains: "abc",
     refUrl: "",
-    attribution: "&copy; <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> contributors &copy; <a href='https://carto.com/attributions'>CARTO</a>",
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     maxNativeZoom: 19,
   },
   dark: {
     label: "Dark",
     icon: "dark_mode",
-    url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-    subdomains: "abcd",
-    refUrl: "",
-    attribution: "&copy; <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> contributors &copy; <a href='https://carto.com/attributions'>CARTO</a>",
-    maxNativeZoom: 19,
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+    subdomains: "abc",
+    refUrl: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}",
+    attribution: "&copy; Esri &mdash; Esri, DeLorme, NAVTEQ",
+    maxNativeZoom: 16,
   },
   satellite: {
     label: "Satellite",
@@ -125,6 +128,8 @@ export const ThermalHotspotMap: React.FC<ThermalHotspotMapProps> = ({
 
   const [activeStyle, setActiveStyle] = useState<MapStyleKey>(defaultStyle);
   const [mapZoom, setMapZoom] = useState<number>(5);
+  const [mapReady, setMapReady] = useState<boolean>(false);
+  const [basemapUnavailable, setBasemapUnavailable] = useState<boolean>(false);
 
   // Validate coordinates: keep 100% of valid FIRMS detections (Requirement 3)
   const validEvents = useMemo(() => {
@@ -164,7 +169,21 @@ export const ThermalHotspotMap: React.FC<ThermalHotspotMapProps> = ({
 
   // Requirement 1 & 7: Initialize Map with India as the dominant viewport
   useEffect(() => {
-    if (!mapContainerRef.current || mapInstanceRef.current) return;
+    if (!mapContainerRef.current) return;
+
+    // Defensively destroy any existing Leaflet map on this container
+    if (mapInstanceRef.current) {
+      try {
+        mapInstanceRef.current.remove();
+      } catch (e) {
+        console.warn("Previous map remove error:", e);
+      }
+      mapInstanceRef.current = null;
+    }
+
+    if ((mapContainerRef.current as any)._leaflet_id) {
+      delete (mapContainerRef.current as any)._leaflet_id;
+    }
 
     const map = L.map(mapContainerRef.current, {
       center: INDIA_CENTER,
@@ -176,27 +195,48 @@ export const ThermalHotspotMap: React.FC<ThermalHotspotMapProps> = ({
       maxZoom: 18,
     });
 
-    // Fit directly to India territorial bounds so India dominates the viewport
-    map.fitBounds(INDIA_BOUNDS, { padding: [15, 15] });
+    // Create dedicated Leaflet panes with explicit z-index hierarchy
+    // TileLayer lives in default tilePane (z-index 200)
+    if (!map.getPane("hotspotClusterPane")) {
+      const clusterPane = map.createPane("hotspotClusterPane");
+      clusterPane.style.zIndex = "550";
+    }
+    if (!map.getPane("hotspotMarkerPane")) {
+      const markerPane = map.createPane("hotspotMarkerPane");
+      markerPane.style.zIndex = "600";
+    }
+
+    // Fit directly to India territorial bounds with safe fallback
+    try {
+      map.fitBounds(INDIA_BOUNDS, { padding: [15, 15] });
+    } catch {
+      map.setView(INDIA_CENTER, INDIA_DEFAULT_ZOOM);
+    }
 
     mapInstanceRef.current = map;
 
     // Ensure map tiles and container sizing stabilize smoothly
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       if (mapInstanceRef.current) {
-        mapInstanceRef.current.invalidateSize();
+        try {
+          mapInstanceRef.current.invalidateSize();
+        } catch {}
       }
     }, 150);
 
-    // Base Tile Layer (with high-contrast class for light mode)
+    // Base Tile Layer
     const config = MAP_STYLES[defaultStyle];
     const base = L.tileLayer(config.url, {
       attribution: config.attribution,
-      subdomains: (config as any).subdomains || "abcd",
+      subdomains: (config as any).subdomains || "abc",
       maxNativeZoom: config.maxNativeZoom,
       maxZoom: 19,
       className: defaultStyle === "light" ? "mc-map-tiles-light" : "",
-    }).addTo(map);
+    });
+    base.on("tileerror", () => {
+      setBasemapUnavailable(true);
+    });
+    base.addTo(map);
     baseTileLayerRef.current = base;
 
     // Reference boundary / place labels overlay
@@ -227,10 +267,33 @@ export const ThermalHotspotMap: React.FC<ThermalHotspotMapProps> = ({
     map.on("click", onMapClick);
 
     setMapZoom(map.getZoom());
+    setMapReady(true);
 
     return () => {
-      map.remove();
-      mapInstanceRef.current = null;
+      clearTimeout(timer);
+      setMapReady(false);
+
+      if (markersLayerRef.current) {
+        try {
+          markersLayerRef.current.clearLayers();
+        } catch {}
+        markersLayerRef.current = null;
+      }
+      baseTileLayerRef.current = null;
+      refTileLayerRef.current = null;
+
+      if (mapInstanceRef.current) {
+        try {
+          mapInstanceRef.current.remove();
+        } catch (e) {
+          console.warn("Map cleanup error:", e);
+        }
+        mapInstanceRef.current = null;
+      }
+
+      if (mapContainerRef.current && (mapContainerRef.current as any)._leaflet_id) {
+        delete (mapContainerRef.current as any)._leaflet_id;
+      }
     };
   }, []);
 
@@ -245,9 +308,11 @@ export const ThermalHotspotMap: React.FC<ThermalHotspotMapProps> = ({
   const switchStyle = (style: MapStyleKey) => {
     if (!mapInstanceRef.current) return;
     setActiveStyle(style);
+    setBasemapUnavailable(false);
 
     if (baseTileLayerRef.current) {
       mapInstanceRef.current.removeLayer(baseTileLayerRef.current);
+      baseTileLayerRef.current = null;
     }
     if (refTileLayerRef.current) {
       mapInstanceRef.current.removeLayer(refTileLayerRef.current);
@@ -257,11 +322,15 @@ export const ThermalHotspotMap: React.FC<ThermalHotspotMapProps> = ({
     const config = MAP_STYLES[style];
     const base = L.tileLayer(config.url, {
       attribution: config.attribution,
-      subdomains: (config as any).subdomains || "abcd",
+      subdomains: (config as any).subdomains || "abc",
       maxNativeZoom: config.maxNativeZoom,
       maxZoom: 19,
       className: style === "light" ? "mc-map-tiles-light" : "",
-    }).addTo(mapInstanceRef.current);
+    });
+    base.on("tileerror", () => {
+      setBasemapUnavailable(true);
+    });
+    base.addTo(mapInstanceRef.current);
     baseTileLayerRef.current = base;
 
     if (config.refUrl) {
@@ -327,340 +396,346 @@ export const ThermalHotspotMap: React.FC<ThermalHotspotMapProps> = ({
 
     sc.load(points);
     return sc;
-  }, [validEvents]);
-
-  // Requirement 2 & 4: Render clusters and individual markers without losing any detections
+  }, [validEvents]);  // Requirement 2 & 4: Render clusters and individual markers without losing any detections
   useEffect(() => {
-    if (!mapInstanceRef.current || !markersLayerRef.current) return;
+    if (!mapReady || !mapInstanceRef.current || !markersLayerRef.current) return;
 
-    markersLayerRef.current.clearLayers();
-
-    if (!validEvents.length) {
-      if (onRenderStatsChange) onRenderStatsChange({ total: 0, visible: 0, clusters: 0 });
-      return;
-    }
-
-    const currentZoom = Math.floor(mapZoom || mapInstanceRef.current.getZoom());
-
-    // Query across global coordinates so no detections are accidentally clipped while panning
-    let items: any[] = [];
     try {
-      items = clusterIndex.getClusters([-180, -85, 180, 85], currentZoom);
-    } catch {
-      items = validEvents.map((ev) => ({
-        type: "Feature",
-        geometry: { type: "Point", coordinates: [ev.coordinates[1], ev.coordinates[0]] },
-        properties: ev,
-      }));
-    }
+      markersLayerRef.current.clearLayers();
 
-    let clustersCount = 0;
-    let visiblePoints = 0;
+      if (!validEvents.length) {
+        if (onRenderStatsChange) onRenderStatsChange({ total: 0, visible: 0, clusters: 0 });
+        return;
+      }
 
-    items.forEach((item) => {
-      const [lon, lat] = item.geometry.coordinates;
+      const currentZoom = Math.floor(mapZoom || mapInstanceRef.current.getZoom());
 
-      if (item.properties && item.properties.cluster) {
-        clustersCount += 1;
-        const count = item.properties.point_count;
-        visiblePoints += count;
-        const clusterId = item.properties.cluster_id;
+      // Query across global coordinates so no detections are accidentally clipped while panning
+      let items: any[] = [];
+      try {
+        items = clusterIndex.getClusters([-180, -85, 180, 85], currentZoom);
+      } catch {
+        items = validEvents.map((ev) => ({
+          type: "Feature",
+          geometry: { type: "Point", coordinates: [ev.coordinates[1], ev.coordinates[0]] },
+          properties: ev,
+        }));
+      }
 
-        // Categories present in this cluster (Requirement 2 & 3)
-        const categories = [
-          { name: "Agricultural Burning", shortLabel: "Agricultural", count: item.properties.agriCount || 0, color: "#16a34a" },
-          { name: "Industrial Heat", shortLabel: "Industrial Heat", count: item.properties.indCount || 0, color: "#7c3aed" },
-          { name: "Wildfire", shortLabel: "Wildfire", count: item.properties.wildfireCount || 0, color: "#ea580c" },
-          { name: "Mining / Waste Heat", shortLabel: "Mining/Waste", count: item.properties.miningCount || 0, color: "#92400e" },
-          { name: "Controlled Burning", shortLabel: "Controlled", count: item.properties.ctrlCount || 0, color: "#f59e0b" },
-          { name: "Sensor Anomaly", shortLabel: "Sensor Anomaly", count: item.properties.anomalyCount || 0, color: "#0891b2" },
-          { name: "Needs Verification", shortLabel: "Verification", count: item.properties.verifyCount || 0, color: "#64748b" },
-        ].filter((c) => c.count > 0);
+      let clustersCount = 0;
+      let visiblePoints = 0;
 
-        const isSingle = categories.length === 1;
+      items.forEach((item) => {
+        const [lon, lat] = item.geometry.coordinates;
 
-        // Proportional cluster bubble sizing (Requirement 1)
-        let size = 24;
-        if (count >= 50) size = 32;
-        else if (count >= 15) size = 28;
+        if (item.properties && item.properties.cluster) {
+          clustersCount += 1;
+          const count = item.properties.point_count;
+          visiblePoints += count;
+          const clusterId = item.properties.cluster_id;
 
-        let clusterHtml = "";
+          // Categories present in this cluster (Requirement 2 & 3)
+          const categories = [
+            { name: "Agricultural Burning", shortLabel: "Agricultural", count: item.properties.agriCount || 0, color: "#16a34a" },
+            { name: "Industrial Heat", shortLabel: "Industrial Heat", count: item.properties.indCount || 0, color: "#7c3aed" },
+            { name: "Wildfire", shortLabel: "Wildfire", count: item.properties.wildfireCount || 0, color: "#ea580c" },
+            { name: "Mining / Waste Heat", shortLabel: "Mining/Waste", count: item.properties.miningCount || 0, color: "#92400e" },
+            { name: "Controlled Burning", shortLabel: "Controlled", count: item.properties.ctrlCount || 0, color: "#f59e0b" },
+            { name: "Sensor Anomaly", shortLabel: "Sensor Anomaly", count: item.properties.anomalyCount || 0, color: "#0891b2" },
+            { name: "Needs Verification", shortLabel: "Verification", count: item.properties.verifyCount || 0, color: "#64748b" },
+          ].filter((c) => c.count > 0);
 
-        if (isSingle) {
-          // Requirement 1 & 2: Single classification cluster uses canonical color & proportional size
-          const singleCat = categories[0];
-          clusterHtml = `
-            <div style="
-              width: ${size}px;
-              height: ${size}px;
-              border-radius: 50%;
-              background: ${singleCat.color};
-              border: 2px solid #ffffff;
-              box-shadow: 0 0 0 2px ${singleCat.color}66, 0 3px 8px rgba(0,0,0,0.28);
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              cursor: pointer;
-              user-select: none;
-              transition: transform 0.15s ease, box-shadow 0.15s ease;
-            ">
-              <span style="font-family: 'JetBrains Mono', monospace; font-size: ${count >= 100 ? '9.5px' : '11px'}; font-weight: 800; color: #ffffff; letter-spacing: -0.02em;">
-                ${count}
-              </span>
-            </div>
-          `;
-        } else {
-          // Requirement 1 & 2: Proportional segmented ring composition for mixed clusters
-          let angleAcc = 0;
-          const gradientSegments = categories.map((c) => {
-            const start = angleAcc;
-            const slice = (c.count / count) * 360;
-            angleAcc += slice;
-            return `${c.color} ${start.toFixed(1)}deg ${angleAcc.toFixed(1)}deg`;
-          }).join(", ");
+          const isSingle = categories.length === 1;
 
-          clusterHtml = `
-            <div style="
-              width: ${size}px;
-              height: ${size}px;
-              border-radius: 50%;
-              background: conic-gradient(${gradientSegments});
-              padding: 2.5px;
-              box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.4), 0 3px 10px rgba(0,0,0,0.3);
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              cursor: pointer;
-              user-select: none;
-              transition: transform 0.15s ease, box-shadow 0.15s ease;
-            ">
+          // Proportional cluster bubble sizing (Requirement 1)
+          let size = 24;
+          if (count >= 50) size = 32;
+          else if (count >= 15) size = 28;
+
+          let clusterHtml = "";
+
+          if (isSingle) {
+            // Requirement 1 & 2: Single classification cluster uses canonical color & proportional size
+            const singleCat = categories[0];
+            clusterHtml = `
               <div style="
-                width: 100%;
-                height: 100%;
+                width: ${size}px;
+                height: ${size}px;
                 border-radius: 50%;
-                background: #0f172a;
-                border: 1px solid rgba(255,255,255,0.4);
+                background: ${singleCat.color};
+                border: 2px solid #ffffff;
+                box-shadow: 0 0 0 2px ${singleCat.color}66, 0 3px 8px rgba(0,0,0,0.28);
                 display: flex;
-                flex-direction: column;
                 align-items: center;
                 justify-content: center;
-                line-height: 1;
+                cursor: pointer;
+                user-select: none;
+                transition: transform 0.15s ease, box-shadow 0.15s ease;
               ">
-                <span style="font-family: 'JetBrains Mono', monospace; font-size: ${count >= 100 ? '9px' : '10.5px'}; font-weight: 800; color: #ffffff; letter-spacing: -0.02em;">
+                <span style="font-family: 'JetBrains Mono', monospace; font-size: ${count >= 100 ? '9.5px' : '11px'}; font-weight: 800; color: #ffffff; letter-spacing: -0.02em;">
                   ${count}
                 </span>
-                <div style="display: flex; gap: 1.5px; align-items: center; margin-top: 1px;">
-                  ${categories.slice(0, 3).map(c => `<span style="width: 3px; height: 3px; border-radius: 50%; background: ${c.color}; display: inline-block;"></span>`).join('')}
+              </div>
+            `;
+          } else {
+            // Requirement 1 & 2: Proportional segmented ring composition for mixed clusters
+            let angleAcc = 0;
+            const gradientSegments = categories.map((c) => {
+              const start = angleAcc;
+              const slice = (c.count / count) * 360;
+              angleAcc += slice;
+              return `${c.color} ${start.toFixed(1)}deg ${angleAcc.toFixed(1)}deg`;
+            }).join(", ");
+
+            clusterHtml = `
+              <div style="
+                width: ${size}px;
+                height: ${size}px;
+                border-radius: 50%;
+                background: conic-gradient(${gradientSegments});
+                padding: 2.5px;
+                box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.4), 0 3px 10px rgba(0,0,0,0.3);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                cursor: pointer;
+                user-select: none;
+                transition: transform 0.15s ease, box-shadow 0.15s ease;
+              ">
+                <div style="
+                  width: 100%;
+                  height: 100%;
+                  border-radius: 50%;
+                  background: #0f172a;
+                  border: 1px solid rgba(255,255,255,0.4);
+                  display: flex;
+                  flex-direction: column;
+                  align-items: center;
+                  justify-content: center;
+                  line-height: 1;
+                ">
+                  <span style="font-family: 'JetBrains Mono', monospace; font-size: ${count >= 100 ? '9px' : '10.5px'}; font-weight: 800; color: #ffffff; letter-spacing: -0.02em;">
+                    ${count}
+                  </span>
+                  <div style="display: flex; gap: 1.5px; align-items: center; margin-top: 1px;">
+                    ${categories.slice(0, 3).map(c => `<span style="width: 3px; height: 3px; border-radius: 50%; background: ${c.color}; display: inline-block;"></span>`).join('')}
+                  </div>
                 </div>
               </div>
+            `;
+          }
+
+          const clusterIcon = L.divIcon({
+            html: clusterHtml,
+            className: "mc-supercluster-icon",
+            iconSize: [size, size],
+            iconAnchor: [size / 2, size / 2],
+          });
+
+          const clusterMarker = L.marker([lat, lon], {
+            icon: clusterIcon,
+            pane: "hotspotClusterPane",
+          });
+
+          // Tooltip showing clear breakdown and click-to-zoom hint (Requirement 1 & 2)
+          const breakdownSummary = categories.map(c => `${c.shortLabel || c.name}: ${c.count}`).join(" &middot; ");
+          clusterMarker.bindTooltip(
+            `<div style="font-size: 11px; line-height: 1.4; padding: 2px 4px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+              <div style="font-weight: 800; color: #0f172a; margin-bottom: 2px;">
+                ${count} Detections <span style="font-weight: 500; color: #64748b; font-size: 10px;">(${isSingle ? categories[0].name : `${categories.length} Types`})</span>
+              </div>
+              <div style="font-size: 10px; color: #475569; max-width: 250px; margin-bottom: 3px;">
+                ${breakdownSummary}
+              </div>
+              <div style="font-size: 9.5px; font-weight: 700; color: #2563eb;">
+                Click to zoom into cluster &rarr;
+              </div>
+            </div>`,
+            { direction: "top", offset: [0, -size / 2 - 2] }
+          );
+
+          // Requirement 1: Clicking cluster zooms into it and reveals individual detections (DOES NOT select a hotspot!)
+          clusterMarker.on("click", (e) => {
+            L.DomEvent.stopPropagation(e);
+            if (!mapInstanceRef.current) return;
+            try {
+              const expZoom = clusterIndex.getClusterExpansionZoom(clusterId);
+              const targetZoom = Math.max(currentZoom + 1, Math.min(expZoom, 15));
+              mapInstanceRef.current.setView([lat, lon], targetZoom, { animate: true });
+            } catch {
+              mapInstanceRef.current.setView([lat, lon], currentZoom + 2, { animate: true });
+            }
+          });
+
+          markersLayerRef.current?.addLayer(clusterMarker);
+        } else {
+          // Individual Hotspot Marker (Requirements 1, 2, 5, 14)
+          visiblePoints += 1;
+          const ev = item.properties as ThermalEvent;
+          const category = getCanonicalCategory(ev?.classification);
+          const meta = CLASSIFICATION_META[category] || CLASSIFICATION_META["Needs Verification"];
+          const isSelected = ev?.id === selectedEventId;
+
+          // Scaled cleanly by Fire Radiative Power (FRP)
+          const frp = typeof ev?.frpMw === "number" ? ev.frpMw : 0;
+          let radius = 6;
+          if (frp >= 50) radius = 8.5;
+          else if (frp >= 15) radius = 7.5;
+          else if (frp >= 8) radius = 6.5;
+
+          const circle = L.circleMarker([lat, lon], {
+            radius: isSelected ? radius + 3.5 : radius,
+            fillColor: meta.color,
+            color: isSelected ? "#2563eb" : "#ffffff",
+            weight: isSelected ? 3.5 : 1.5,
+            fillOpacity: 0.95,
+            pane: "hotspotMarkerPane",
+          });
+
+          // Requirement 14: Hover tooltip with Detection ID, Location, Classification, FRP, and Classification Confidence
+          const loc = ev?.locationName || (ev?.state ? `${ev.state}, India` : "India");
+          const classConf = ev?.classificationConfidence || 75;
+          const firmsConf = ev?.firmsConfidence || ev?.confidence || 0;
+
+          circle.bindTooltip(
+            `<div style="font-size: 11px; line-height: 1.4; padding: 3px 5px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; min-width: 175px;">
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 2px;">
+                <span style="color: #2563eb; font-family: monospace; font-weight: 800; font-size: 11.5px;">${formatCompactId(ev?.id)}</span>
+                <span style="font-size: 9.5px; font-weight: 800; color: ${meta.color}; background: ${meta.color}15; padding: 1px 5px; border-radius: 3px; border: 1px solid ${meta.color}35;">${meta.label}</span>
+              </div>
+              <div style="font-size: 10.5px; font-weight: 700; color: #0f172a; margin-bottom: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${loc}</div>
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 10px; color: #475569; border-top: 1px solid #e2e8f0; padding-top: 3px; margin-bottom: 2px;">
+                <div>FRP: <strong style="color: #dc2626;">${frp.toFixed(1)} MW</strong></div>
+                <div>AI Conf: <strong style="color: #1e40af;">${classConf}%</strong></div>
+              </div>
+              <div style="font-size: 9.5px; color: #64748b;">
+                FIRMS Confidence: <strong style="color: #0f172a;">${firmsConf}%</strong>
+              </div>
+            </div>`,
+            { direction: "top", offset: [0, -radius - 2] }
+          );
+
+          // Requirement 9: Real Classification Evidence only if present in data
+          const realEvidence = (ev.evidenceList && ev.evidenceList.length > 0)
+            ? ev.evidenceList
+            : (ev.supportingEvidence && ev.supportingEvidence.length > 0)
+            ? ev.supportingEvidence
+            : [];
+
+          const evidenceSectionHtml = realEvidence.length > 0
+            ? `
+              <div style="margin-top: 6px; border-top: 1px solid #e2e8f0; padding-top: 6px;">
+                <div style="font-size: 10px; font-weight: 700; color: #64748b; text-transform: uppercase; margin-bottom: 4px; letter-spacing: 0.03em;">
+                  Classification Evidence
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 3px;">
+                  ${realEvidence.slice(0, 3).map((itemText: string) => `
+                    <div style="display: flex; align-items: flex-start; gap: 5px; font-size: 10px; color: #334155; line-height: 1.3;">
+                      <span style="color: #16a34a; font-weight: 700; font-size: 11px; line-height: 1;">✓</span>
+                      <span>${itemText}</span>
+                    </div>
+                  `).join('')}
+                </div>
+              </div>
+            `
+            : "";
+
+          const classConfVal = ev.classificationConfidence || 75;
+          const classConfTier = classConfVal >= 80 ? "High confidence" : classConfVal >= 60 ? "Moderate confidence" : "Low confidence";
+
+          const popupDiv = document.createElement("div");
+          popupDiv.className = "mc-map-popup";
+          popupDiv.innerHTML = `
+            <div class="mc-map-popup__title-row" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+              <span class="mc-map-popup__event-id" style="font-size: 12.5px; font-weight: 800; color: #2563eb;" title="${ev.id}">
+                ${formatCompactId(ev.id)}
+              </span>
+              <span class="mc-badge ${
+                ev.severity === "CRITICAL" || ev.severity === "HIGH" ? "mc-badge--critical" : "mc-badge--warning"
+              }">
+                ${ev.severity}
+              </span>
+            </div>
+
+            <div style="font-size: 11.5px; font-weight: 700; color: #0f172a; margin-bottom: 6px;">
+              ${ev.locationName}
+            </div>
+
+            <!-- Classification & Confidence (Our System) -->
+            <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 4px; padding: 6px 8px; margin-bottom: 6px;">
+              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+                <span style="font-size: 10px; font-weight: 700; color: #64748b; text-transform: uppercase;">Classification</span>
+                <span style="font-size: 11px; font-weight: 800; color: ${meta.color};">${meta.label}</span>
+              </div>
+              <div style="display: flex; align-items: center; justify-content: space-between; font-size: 10.5px;">
+                <span style="color: #64748b;">Classification Confidence:</span>
+                <span style="font-weight: 700; color: #1e40af;">${classConfVal}% <span style="font-weight: 500; color: #64748b; font-size: 10px;">(${classConfTier})</span></span>
+              </div>
+            </div>
+
+            <!-- NASA FIRMS Observation Section -->
+            <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 4px; padding: 6px 8px; font-size: 10.5px; display: flex; flex-direction: column; gap: 3px;">
+              <div style="font-size: 9.5px; font-weight: 700; color: #64748b; text-transform: uppercase; margin-bottom: 1px;">
+                NASA FIRMS Telemetry
+              </div>
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px;">
+                <div>
+                  <span style="color: #64748b;">FRP:</span>
+                  <span style="font-weight: 700; color: #dc2626; margin-left: 4px;">${frp.toFixed(1)} MW</span>
+                </div>
+                <div>
+                  <span style="color: #64748b;">FIRMS Conf:</span>
+                  <span style="font-weight: 700; color: #0f172a; margin-left: 4px;">${ev?.firmsConfidence || ev?.confidence || 0}%</span>
+                </div>
+              </div>
+              <div style="color: #475569; font-size: 10px; margin-top: 1px;">
+                Observation: <strong>${ev?.detectedTime || "NRT"}</strong> &middot; ${ev?.daynight === "N" ? "Night Pass" : "Day Pass"}
+              </div>
+              ${ev.nearestFacility ? `
+              <div style="color: #475569; font-size: 10px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;" title="${ev.nearestFacility.name}">
+                Nearby Facility: <strong>${ev.nearestFacility.name}</strong> (${ev.nearestFacility.distanceKm} km)
+              </div>
+              ` : ""}
+            </div>
+
+            ${evidenceSectionHtml}
+
+            <div class="mc-map-popup__actions" style="margin-top: 8px;">
+              <button id="btn-view-incident-${ev.id}" class="mc-btn mc-btn--primary" style="width: 100%; padding: 5px 8px; font-size: 11px; font-weight: 600; cursor: pointer; border-radius: 4px;">
+                View Full Incident Record &rarr;
+              </button>
             </div>
           `;
+
+          circle.bindPopup(popupDiv, { maxWidth: 300, className: "mc-leaflet-popup", autoPan: false });
+
+          circle.on("click", (e) => {
+            L.DomEvent.stopPropagation(e);
+            if (onSelectEvent) onSelectEvent(ev);
+          });
+
+          circle.on("popupopen", () => {
+            const btnView = document.getElementById(`btn-view-incident-${ev.id}`);
+            if (btnView && onViewIncident) {
+              btnView.onclick = () => onViewIncident(ev);
+            }
+          });
+
+          markersLayerRef.current?.addLayer(circle);
         }
-
-        const clusterIcon = L.divIcon({
-          html: clusterHtml,
-          className: "mc-supercluster-icon",
-          iconSize: [size, size],
-          iconAnchor: [size / 2, size / 2],
-        });
-
-        const clusterMarker = L.marker([lat, lon], { icon: clusterIcon });
-
-        // Tooltip showing clear breakdown and click-to-zoom hint (Requirement 1 & 2)
-        const breakdownSummary = categories.map(c => `${c.shortLabel || c.name}: ${c.count}`).join(" &middot; ");
-        clusterMarker.bindTooltip(
-          `<div style="font-size: 11px; line-height: 1.4; padding: 2px 4px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
-            <div style="font-weight: 800; color: #0f172a; margin-bottom: 2px;">
-              ${count} Detections <span style="font-weight: 500; color: #64748b; font-size: 10px;">(${isSingle ? categories[0].name : `${categories.length} Types`})</span>
-            </div>
-            <div style="font-size: 10px; color: #475569; max-width: 250px; margin-bottom: 3px;">
-              ${breakdownSummary}
-            </div>
-            <div style="font-size: 9.5px; font-weight: 700; color: #2563eb;">
-              Click to zoom into cluster &rarr;
-            </div>
-          </div>`,
-          { direction: "top", offset: [0, -size / 2 - 2] }
-        );
-
-        // Requirement 1: Clicking cluster zooms into it and reveals individual detections (DOES NOT select a hotspot!)
-        clusterMarker.on("click", (e) => {
-          L.DomEvent.stopPropagation(e);
-          if (!mapInstanceRef.current) return;
-          try {
-            const expZoom = clusterIndex.getClusterExpansionZoom(clusterId);
-            const targetZoom = Math.max(currentZoom + 1, Math.min(expZoom, 15));
-            mapInstanceRef.current.setView([lat, lon], targetZoom, { animate: true });
-          } catch {
-            mapInstanceRef.current.setView([lat, lon], currentZoom + 2, { animate: true });
-          }
-        });
-
-        markersLayerRef.current?.addLayer(clusterMarker);
-      } else {
-        // Individual Hotspot Marker (Requirements 1, 2, 5, 14)
-        visiblePoints += 1;
-        const ev = item.properties as ThermalEvent;
-        const category = getCanonicalCategory(ev?.classification);
-        const meta = CLASSIFICATION_META[category] || CLASSIFICATION_META["Needs Verification"];
-        const isSelected = ev?.id === selectedEventId;
-
-        // Scaled cleanly by Fire Radiative Power (FRP)
-        const frp = typeof ev?.frpMw === "number" ? ev.frpMw : 0;
-        let radius = 6;
-        if (frp >= 50) radius = 8.5;
-        else if (frp >= 15) radius = 7.5;
-        else if (frp >= 8) radius = 6.5;
-
-        const circle = L.circleMarker([lat, lon], {
-          radius: isSelected ? radius + 3.5 : radius,
-          fillColor: meta.color,
-          color: isSelected ? "#2563eb" : "#ffffff",
-          weight: isSelected ? 3.5 : 1.5,
-          fillOpacity: 0.95,
-        });
-
-        // Requirement 14: Hover tooltip with Detection ID, Location, Classification, FRP, and Classification Confidence
-        const loc = ev?.locationName || (ev?.state ? `${ev.state}, India` : "India");
-        const classConf = ev?.classificationConfidence || 75;
-        const firmsConf = ev?.firmsConfidence || ev?.confidence || 0;
-
-        circle.bindTooltip(
-          `<div style="font-size: 11px; line-height: 1.4; padding: 3px 5px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; min-width: 175px;">
-            <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 2px;">
-              <span style="color: #2563eb; font-family: monospace; font-weight: 800; font-size: 11.5px;">${formatCompactId(ev?.id)}</span>
-              <span style="font-size: 9.5px; font-weight: 800; color: ${meta.color}; background: ${meta.color}15; padding: 1px 5px; border-radius: 3px; border: 1px solid ${meta.color}35;">${meta.label}</span>
-            </div>
-            <div style="font-size: 10.5px; font-weight: 700; color: #0f172a; margin-bottom: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${loc}</div>
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 10px; color: #475569; border-top: 1px solid #e2e8f0; padding-top: 3px; margin-bottom: 2px;">
-              <div>FRP: <strong style="color: #dc2626;">${frp.toFixed(1)} MW</strong></div>
-              <div>AI Conf: <strong style="color: #1e40af;">${classConf}%</strong></div>
-            </div>
-            <div style="font-size: 9.5px; color: #64748b;">
-              FIRMS Confidence: <strong style="color: #0f172a;">${firmsConf}%</strong>
-            </div>
-          </div>`,
-          { direction: "top", offset: [0, -radius - 2] }
-        );
-
-        // Requirement 9: Real Classification Evidence only if present in data
-        const realEvidence = (ev.evidenceList && ev.evidenceList.length > 0)
-          ? ev.evidenceList
-          : (ev.supportingEvidence && ev.supportingEvidence.length > 0)
-          ? ev.supportingEvidence
-          : [];
-
-        const evidenceSectionHtml = realEvidence.length > 0
-          ? `
-            <div style="margin-top: 6px; border-top: 1px solid #e2e8f0; padding-top: 6px;">
-              <div style="font-size: 10px; font-weight: 700; color: #64748b; text-transform: uppercase; margin-bottom: 4px; letter-spacing: 0.03em;">
-                Classification Evidence
-              </div>
-              <div style="display: flex; flex-direction: column; gap: 3px;">
-                ${realEvidence.slice(0, 3).map((itemText: string) => `
-                  <div style="display: flex; align-items: flex-start; gap: 5px; font-size: 10px; color: #334155; line-height: 1.3;">
-                    <span style="color: #16a34a; font-weight: 700; font-size: 11px; line-height: 1;">✓</span>
-                    <span>${itemText}</span>
-                  </div>
-                `).join('')}
-              </div>
-            </div>
-          `
-          : "";
-
-        const classConfVal = ev.classificationConfidence || 75;
-        const classConfTier = classConfVal >= 80 ? "High confidence" : classConfVal >= 60 ? "Moderate confidence" : "Low confidence";
-
-        const popupDiv = document.createElement("div");
-        popupDiv.className = "mc-map-popup";
-        popupDiv.innerHTML = `
-          <div class="mc-map-popup__title-row" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
-            <span class="mc-map-popup__event-id" style="font-size: 12.5px; font-weight: 800; color: #2563eb;" title="${ev.id}">
-              ${formatCompactId(ev.id)}
-            </span>
-            <span class="mc-badge ${
-              ev.severity === "CRITICAL" || ev.severity === "HIGH" ? "mc-badge--critical" : "mc-badge--warning"
-            }">
-              ${ev.severity}
-            </span>
-          </div>
-
-          <div style="font-size: 11.5px; font-weight: 700; color: #0f172a; margin-bottom: 6px;">
-            ${ev.locationName}
-          </div>
-
-          <!-- Classification & Confidence (Our System) -->
-          <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 4px; padding: 6px 8px; margin-bottom: 6px;">
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
-              <span style="font-size: 10px; font-weight: 700; color: #64748b; text-transform: uppercase;">Classification</span>
-              <span style="font-size: 11px; font-weight: 800; color: ${meta.color};">${meta.label}</span>
-            </div>
-            <div style="display: flex; align-items: center; justify-content: space-between; font-size: 10.5px;">
-              <span style="color: #64748b;">Classification Confidence:</span>
-              <span style="font-weight: 700; color: #1e40af;">${classConfVal}% <span style="font-weight: 500; color: #64748b; font-size: 10px;">(${classConfTier})</span></span>
-            </div>
-          </div>
-
-          <!-- NASA FIRMS Observation Section -->
-          <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 4px; padding: 6px 8px; font-size: 10.5px; display: flex; flex-direction: column; gap: 3px;">
-            <div style="font-size: 9.5px; font-weight: 700; color: #64748b; text-transform: uppercase; margin-bottom: 1px;">
-              NASA FIRMS Telemetry
-            </div>
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px;">
-              <div>
-                <span style="color: #64748b;">FRP:</span>
-                <span style="font-weight: 700; color: #dc2626; margin-left: 4px;">${frp.toFixed(1)} MW</span>
-              </div>
-              <div>
-                <span style="color: #64748b;">FIRMS Conf:</span>
-                <span style="font-weight: 700; color: #0f172a; margin-left: 4px;">${ev?.firmsConfidence || ev?.confidence || 0}%</span>
-              </div>
-            </div>
-            <div style="color: #475569; font-size: 10px; margin-top: 1px;">
-              Observation: <strong>${ev?.detectedTime || "NRT"}</strong> &middot; ${ev?.daynight === "N" ? "Night Pass" : "Day Pass"}
-            </div>
-            ${ev.nearestFacility ? `
-            <div style="color: #475569; font-size: 10px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;" title="${ev.nearestFacility.name}">
-              Nearby Facility: <strong>${ev.nearestFacility.name}</strong> (${ev.nearestFacility.distanceKm} km)
-            </div>
-            ` : ""}
-          </div>
-
-          ${evidenceSectionHtml}
-
-          <div class="mc-map-popup__actions" style="margin-top: 8px;">
-            <button id="btn-view-incident-${ev.id}" class="mc-btn mc-btn--primary" style="width: 100%; padding: 5px 8px; font-size: 11px; font-weight: 600; cursor: pointer; border-radius: 4px;">
-              View Full Incident Record &rarr;
-            </button>
-          </div>
-        `;
-
-        circle.bindPopup(popupDiv, { maxWidth: 300, className: "mc-leaflet-popup", autoPan: false });
-
-        circle.on("click", (e) => {
-          L.DomEvent.stopPropagation(e);
-          if (onSelectEvent) onSelectEvent(ev);
-        });
-
-        circle.on("popupopen", () => {
-          const btnView = document.getElementById(`btn-view-incident-${ev.id}`);
-          if (btnView && onViewIncident) {
-            btnView.onclick = () => onViewIncident(ev);
-          }
-        });
-
-        markersLayerRef.current?.addLayer(circle);
-      }
-    });
-
-    if (onRenderStatsChange) {
-      onRenderStatsChange({
-        total: validEvents.length,
-        visible: visiblePoints,
-        clusters: clustersCount,
       });
+
+      if (onRenderStatsChange) {
+        onRenderStatsChange({
+          total: validEvents.length,
+          visible: visiblePoints,
+          clusters: clustersCount,
+        });
+      }
+    } catch (err) {
+      console.error("[ThermalHotspotMap] Error rendering hotspot markers:", err);
     }
-  }, [validEvents, clusterIndex, mapZoom, selectedEventId, onSelectEvent, onViewIncident, onAnalyzeEvent, onRenderStatsChange]);
+  }, [mapReady, validEvents, clusterIndex, mapZoom, selectedEventId, onSelectEvent, onViewIncident, onAnalyzeEvent, onRenderStatsChange]);
 
   // Sorted categories for compact bottom legend: active first (Requirement 12)
   const sortedLegendEntries = useMemo(() => {
@@ -712,7 +787,7 @@ export const ThermalHotspotMap: React.FC<ThermalHotspotMapProps> = ({
         <button
           className={`mc-style-btn ${activeStyle === "light" ? "is-active" : ""}`}
           onClick={() => switchStyle("light")}
-          title="Esri World Light Gray Canvas"
+          title="OpenStreetMap Standard"
         >
           <span className="material-symbols-outlined" style={{ fontSize: "14px" }}>light_mode</span>
           Light
@@ -736,6 +811,49 @@ export const ThermalHotspotMap: React.FC<ThermalHotspotMapProps> = ({
           Satellite
         </button>
       </div>
+
+      {/* Safe Non-Blocking Basemap Unavailable Indicator */}
+      {basemapUnavailable && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: "48px",
+            left: "14px",
+            zIndex: 500,
+            background: "rgba(15, 23, 42, 0.90)",
+            backdropFilter: "blur(6px)",
+            border: "1px solid #475569",
+            borderRadius: "6px",
+            padding: "4px 10px",
+            color: "#f8fafc",
+            fontSize: "11px",
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.25)",
+          }}
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: "14px", color: "#f59e0b" }}>
+            cloud_off
+          </span>
+          <span>Basemap unavailable (Hotspots active)</span>
+          <button
+            onClick={() => setBasemapUnavailable(false)}
+            style={{
+              background: "none",
+              border: "none",
+              color: "#94a3b8",
+              cursor: "pointer",
+              padding: "0 2px",
+              fontSize: "11px",
+              marginLeft: "4px",
+            }}
+            title="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Compact Unified Map Controls: Zoom In / Out & India View */}
       <div

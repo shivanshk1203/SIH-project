@@ -43,6 +43,16 @@ export class ErrorBoundary extends Component<Props, State> {
           <p style={{ margin: 0, color: "#94a3b8", fontSize: "12px" }}>
             An unexpected error occurred in this component. The remaining intelligence and map tools remain active.
           </p>
+          {this.state.error && (
+            <div style={{ marginTop: "10px", padding: "8px", background: "rgba(0,0,0,0.4)", borderRadius: "4px" }}>
+              <strong style={{ color: "#ef4444", fontSize: "12px", display: "block" }}>{this.state.error.name}: {this.state.error.message}</strong>
+              {this.state.error.stack && (
+                <pre style={{ margin: "4px 0 0 0", fontSize: "10px", color: "#cbd5e1", whiteSpace: "pre-wrap", maxHeight: "150px", overflowY: "auto" }}>
+                  {this.state.error.stack}
+                </pre>
+              )}
+            </div>
+          )}
           <button
             onClick={() => this.setState({ hasError: false, error: null })}
             style={{

@@ -42,6 +42,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
 import math
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -54,10 +55,22 @@ load_dotenv()
 
 app = FastAPI(title="Agni Netra — Thermal Intelligence & Detection Platform")
 
-# Allow the frontend (running on a different port during development) to call this API
+# Allow the frontend to call this API. In development the Vite dev server proxies
+# /api requests directly (see frontend/vite.config.ts), so CORS is only exercised
+# when the frontend is hosted separately from the backend (e.g. in production).
+# Configure allowed origins via CORS_ALLOWED_ORIGINS in backend/.env, e.g.:
+#   CORS_ALLOWED_ORIGINS=https://your-frontend.example.com,http://localhost:5173
+# Falls back to "*" (allow all) only when the variable is unset, which is fine for
+# local demos but should always be restricted before a real deployment.
+_cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "*")
+CORS_ALLOWED_ORIGINS = (
+    ["*"] if _cors_origins_env.strip() == "*"
+    else [origin.strip() for origin in _cors_origins_env.split(",") if origin.strip()]
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -161,8 +161,14 @@ def get_hotspots(
         sanitized_error = str(error)
         if api_key:
             sanitized_error = sanitized_error.replace(api_key, "***")
-        print(f"[firms_api] NASA FIRMS request failed: {sanitized_error}")
-        raise RuntimeError(f"NASA FIRMS API request failed: {sanitized_error}") from None
+        print(f"[firms_api] NASA FIRMS request failed: {sanitized_error}. Falling back to demo data.")
+        demo_data = _load_sample_data(n_w, n_s, n_e, n_n)
+        _firms_cache[cache_key] = {"data": demo_data, "timestamp": now}
+        print(f"[hotspots] source: sample_hotspots.json (fallback)")
+        print(f"[hotspots] records returned: {len(demo_data)}")
+        print(f"[hotspots] records after India filter: {len(demo_data)}")
+        print(f"[hotspots] demo data: True")
+        return demo_data
 
 
 def _fetch_real_firms_data(api_key: str, area_str: str, day_range: int = 3) -> list[dict]:

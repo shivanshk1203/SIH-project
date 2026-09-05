@@ -26,7 +26,6 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>("dashboard");
   const [events, setEvents] = useState<ThermalEvent[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<ThermalEvent | null>(null);
-  const [explicitMapTargetId, setExplicitMapTargetId] = useState<string | null>(null);
   const [alerts, setAlerts] = useState<OperationalAlert[]>(MOCK_ACTIVE_ALERTS);
   const [facilities, setFacilities] = useState<FacilityProfile[]>(MOCK_FACILITY_PROFILES);
 
@@ -43,7 +42,10 @@ export default function App() {
     setIsLoading(true);
     setLoadError(null);
 
-    fetch(`/api/hotspots?days=${days}`)
+    // In dev, Vite proxies "/api" to the backend (see vite.config.ts) so this stays relative.
+    // In production, set VITE_API_BASE_URL if the frontend and backend are hosted separately.
+    const apiBase = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "");
+    fetch(`${apiBase}/api/hotspots?days=${days}`)
       .then((res) => {
         if (!res.ok) throw new Error(`Backend response error: ${res.status}`);
         return res.json();
@@ -285,15 +287,6 @@ export default function App() {
   }, [dayRange, loadHotspots]);
 
   // Interconnected Navigation Handlers
-  const handleTabChange = (tab: NavTab) => {
-    if (tab === "map") {
-      // Direct navigation to Thermal Map MUST start with NO selection
-      setExplicitMapTargetId(null);
-      setSelectedEvent(null);
-    }
-    setActiveTab(tab);
-  };
-
   const handleViewIncident = (event: ThermalEvent) => {
     setSelectedEvent(event);
     setActiveTab("incident");
@@ -320,7 +313,7 @@ export default function App() {
       {/* 1. Persistent Mission Control Sidebar (7 Items) */}
       <SidebarNav
         activeTab={activeTab}
-        onTabChange={handleTabChange}
+        onTabChange={setActiveTab}
         criticalAlertCount={alerts.filter((a) => a.severity === "CRITICAL" || a.severity === "HIGH").length}
         unresolvedCount={4}
       />
@@ -352,23 +345,15 @@ export default function App() {
               onAnalyzeEvent={handleAnalyzeEvent}
               onNavigateToAlerts={() => setActiveTab("alerts")}
               onNavigateToIncidents={() => setActiveTab("incident")}
-              onNavigateToMap={() => {
-                setExplicitMapTargetId(null);
-                setSelectedEvent(null);
-                setActiveTab("map");
-              }}
-              onNavigateToClassification={() => setActiveTab("classification")}
+              onNavigateToMap={() => setActiveTab("map")}
             />
           )}
 
           {activeTab === "map" && (
             <ThermalMapPage
               events={events}
-              selectedEventId={explicitMapTargetId || undefined}
-              onSelectEvent={(ev) => {
-                handleSelectEvent(ev);
-                setExplicitMapTargetId(ev ? ev.id : null);
-              }}
+              selectedEventId={selectedEvent?.id}
+              onSelectEvent={handleSelectEvent}
               onViewIncident={handleViewIncident}
               onAnalyzeEvent={handleAnalyzeEvent}
             />
@@ -381,13 +366,7 @@ export default function App() {
               onSelectEvent={handleSelectEvent}
               onViewIncident={handleViewIncident}
               onNavigateToMap={(ev) => {
-                if (ev) {
-                  setExplicitMapTargetId(ev.id);
-                  handleSelectEvent(ev);
-                } else {
-                  setExplicitMapTargetId(null);
-                  handleSelectEvent(null);
-                }
+                if (ev) handleSelectEvent(ev);
                 setActiveTab("map");
               }}
               lastUpdatedTime={lastUpdatedTime}
@@ -399,11 +378,7 @@ export default function App() {
             <IncidentInvestigationPage
               incident={selectedEvent || events[0] || PRIMARY_INCIDENT}
               onNavigateToReports={() => setActiveTab("reports")}
-              onNavigateToMap={() => {
-                setExplicitMapTargetId(null);
-                setSelectedEvent(null);
-                setActiveTab("map");
-              }}
+              onNavigateToMap={() => setActiveTab("map")}
             />
           )}
 
