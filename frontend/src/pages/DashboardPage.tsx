@@ -10,6 +10,10 @@ interface DashboardPageProps {
   lastUpdatedTime: string;
   isLoading: boolean;
   loadError: string | null;
+  // Feed health
+  feedStatus?: "LIVE" | "DEGRADED" | "OFFLINE";
+  isDemoData?: boolean;
+  lastSuccessfulFetch?: string | null;
   dayRange: number;
   onDayRangeChange: (days: number) => void;
   onRefreshData: () => void;
@@ -34,6 +38,9 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
   alerts = [],
   lastUpdatedTime,
   loadError,
+  feedStatus = "OFFLINE",
+  isDemoData = false,
+  lastSuccessfulFetch = null,
   onRefreshData,
   onViewIncident,
   onAnalyzeEvent,
@@ -291,8 +298,57 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
         </div>
       </div>
 
-      {/* Feed Notice if error */}
-      {loadError && (
+      {/* Feed Status Banner */}
+      {feedStatus === "LIVE" && !isDemoData && (
+        <div
+          style={{
+            padding: "7px 14px",
+            background: "#f0fdf4",
+            border: "1px solid #86efac",
+            borderRadius: "6px",
+            color: "#166534",
+            fontSize: "12px",
+            display: "flex",
+            alignItems: "center",
+            gap: "8px",
+          }}
+        >
+          <span style={{ fontWeight: 700, color: "#16a34a" }}>● LIVE</span>
+          <span>NASA FIRMS · Real-time NRT feed active</span>
+          {lastSuccessfulFetch && <span style={{ marginLeft: "auto", opacity: 0.7 }}>Last updated {lastSuccessfulFetch}</span>}
+        </div>
+      )}
+
+      {feedStatus === "DEGRADED" && isDemoData && (
+        <div
+          style={{
+            padding: "7px 14px",
+            background: "#fffbeb",
+            border: "1px solid #fcd34d",
+            borderRadius: "6px",
+            color: "#92400e",
+            fontSize: "12px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <span>
+            <span style={{ fontWeight: 700 }}>⚠ DEMO DATA</span>
+            {" — No FIRMS API key configured on server. Showing sample telemetry. "}
+            <a
+              href="https://firms.modaps.eosdis.nasa.gov/api/map_key/"
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: "#b45309", fontWeight: 600 }}
+            >
+              Get a free key ↗
+            </a>
+          </span>
+        </div>
+      )}
+
+      {feedStatus === "OFFLINE" && (
         <div
           style={{
             padding: "8px 14px",
@@ -306,10 +362,17 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
             justifyContent: "space-between",
           }}
         >
-          <span>Sensor feed notice: {loadError}. Showing cached telemetry.</span>
+          <span>
+            <span style={{ fontWeight: 700 }}>● OFFLINE</span>
+            {" — NASA FIRMS feed unavailable"}
+            {loadError ? `: ${loadError}` : ""}
+            {lastSuccessfulFetch
+              ? ` · Showing data from ${lastSuccessfulFetch}`
+              : " · No detection data available"}
+          </span>
           <button
             className="mc-btn mc-btn--secondary"
-            style={{ padding: "2px 8px", fontSize: "11px" }}
+            style={{ padding: "2px 8px", fontSize: "11px", marginLeft: "12px", flexShrink: 0 }}
             onClick={onRefreshData}
           >
             Retry

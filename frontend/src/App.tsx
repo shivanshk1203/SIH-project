@@ -37,28 +37,51 @@ export default function App() {
   const [sourceDescription, setSourceDescription] = useState<string>("NASA FIRMS (VIIRS 375m NRT)");
   const [lastUpdatedTime, setLastUpdatedTime] = useState<string>("");
 
+  // Feed health tracking
+  const [feedStatus, setFeedStatus] = useState<"LIVE" | "DEGRADED" | "OFFLINE">("OFFLINE");
+  const [isDemoData, setIsDemoData] = useState<boolean>(false);
+  const [lastSuccessfulFetch, setLastSuccessfulFetch] = useState<string | null>(null);
+  // Stale events: last successfully loaded events kept when live fetch fails
+  const [staleEvents, setStaleEvents] = useState<ThermalEvent[]>([]);
+
   // Fetch real-time NASA FIRMS & OSM backend data (Complete pipeline, NO slicing, NO discarding!)
   const loadHotspots = useCallback((days: number = 3) => {
     setIsLoading(true);
     setLoadError(null);
 
     // In dev, Vite proxies "/api" to the backend (see vite.config.ts) so this stays relative.
-    // In production, set VITE_API_BASE_URL if the frontend and backend are hosted separately.
+    // In production, VITE_API_BASE_URL must be set in the hosting dashboard (Render/Vercel)
+    // so Vite bakes it into the production bundle at build time.
     const apiBase = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "");
     fetch(`${apiBase}/api/hotspots?days=${days}`)
       .then((res) => {
-        if (!res.ok) throw new Error(`Backend response error: ${res.status}`);
+        if (!res.ok) {
+          return res.json().catch(() => null).then((body) => {
+            const detail = body?.detail;
+            const msg =
+              typeof detail === "object" && detail?.details
+                ? detail.details
+                : typeof detail === "string"
+                ? detail
+                : `HTTP ${res.status} from backend`;
+            throw new Error(msg);
+          });
+        }
         return res.json();
       })
       .then((data) => {
         const rawHotspots: any[] = data.hotspots || [];
         const count = data.count || rawHotspots.length;
+        const isDemo: boolean = data.is_demo_data === true;
         setTotalFIRMSCount(count);
         setSourceDescription(data.source || `NASA FIRMS (VIIRS, ${days} days)`);
+        setIsDemoData(isDemo);
+        setFeedStatus(isDemo ? "DEGRADED" : "LIVE");
 
         const now = new Date();
         const timeStr = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) + " IST";
         setLastUpdatedTime(timeStr);
+        setLastSuccessfulFetch(timeStr);
 
         if (rawHotspots.length > 0) {
           // Map EVERY single NASA FIRMS detection with rigorous multi-signal classification
@@ -231,6 +254,7 @@ export default function App() {
 
           // Set 100% of real NASA FIRMS events into state!
           setEvents(mappedLive);
+          setStaleEvents(mappedLive);  // Save for stale-data recovery if next fetch fails
 
           // Derive shared operational alerts from high-severity events in the same dataset
           const highSevEvents = mappedLive.filter((e) => e.severity === "CRITICAL" || e.severity === "HIGH");
@@ -276,8 +300,15 @@ export default function App() {
         setIsLoading(false);
       })
       .catch((err) => {
-        console.warn("Backend fetch failed, using fallback:", err);
-        setLoadError(err.message || "Failed to load live NASA FIRMS data");
+        const msg = err.message || "NASA FIRMS feed unavailable";
+        console.warn("[AgniNetra] Backend fetch failed:", msg);
+        setLoadError(msg);
+        setFeedStatus("OFFLINE");
+        // Preserve stale events if we have any from a previous successful fetch
+        if (staleEvents.length > 0) {
+          setEvents(staleEvents);
+          setTotalFIRMSCount(staleEvents.length);
+        }
         setIsLoading(false);
       });
   }, []);
@@ -337,6 +368,9 @@ export default function App() {
               lastUpdatedTime={lastUpdatedTime}
               isLoading={isLoading}
               loadError={loadError}
+              feedStatus={feedStatus}
+              isDemoData={isDemoData}
+              lastSuccessfulFetch={lastSuccessfulFetch}
               dayRange={dayRange}
               onDayRangeChange={setDayRange}
               onRefreshData={() => loadHotspots(dayRange)}

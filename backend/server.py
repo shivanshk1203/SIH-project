@@ -47,6 +47,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import firms_api
+from firms_api import FIRMSFetchError
 import osm_api
 import detection
 import thermal_analysis
@@ -199,9 +200,22 @@ def get_classified_hotspots(
             north=clamped_n,
             day_range=days,
         )
+    except FIRMSFetchError as firms_err:
+        err_msg = str(firms_err)
+        print(f"[server] FIRMS API error: {err_msg}")
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "status": "error",
+                "source": "NASA FIRMS",
+                "error": "FIRMS request failed",
+                "details": err_msg,
+                "hint": "Check FIRMS_MAP_KEY environment variable on the server.",
+            },
+        )
     except Exception as err:
-        print(f"[server] Error getting hotspots from FIRMS: {err}")
-        raise HTTPException(status_code=502, detail=f"Failed to fetch thermal hotspots: {err}")
+        print(f"[server] Unexpected error fetching hotspots: {err}")
+        raise HTTPException(status_code=502, detail=f"Unexpected backend error: {err}")
 
     t_firms = time.perf_counter()
 
@@ -258,8 +272,9 @@ def get_classified_hotspots(
         f"(FIRMS: {firms_ms}ms, OSM: {osm_ms}ms, classify: {classify_ms}ms)"
     )
 
-    is_demo = bool(results and results[0].get("is_demo_data", False))
-    source_str = "Demo Sample Data" if is_demo else f"NASA FIRMS (VIIRS_SNPP_NRT, {days} days)"
+    # Detect demo data from the RAW hotspots list (before analysis strips/alters fields)
+    is_demo = bool(hotspots and hotspots[0].get("is_demo_data", False))
+    source_str = "Demo Sample Data (no FIRMS key configured)" if is_demo else f"NASA FIRMS (VIIRS_SNPP_NRT, {days} days)"
 
     health = thermal_analysis.compute_analysis_health(results)
     telemetry = thermal_analysis.compute_analysis_telemetry(results)
@@ -327,7 +342,37 @@ def health_check():
         "endpoints": {
             "hotspots": "/api/hotspots",
             "facilities": "/api/facilities?lat=<lat>&lon=<lon>&radius=<meters>",
+            "health": "/api/health",
         },
+    }
+
+
+@app.get("/api/health")
+def api_health():
+    """Returns backend health status including FIRMS key presence and last cache state.
+    Never exposes the actual API key value.
+    """
+    import os
+    api_key_present = bool(os.getenv("FIRMS_MAP_KEY", "").strip())
+
+    # Peek at the in-memory cache to report last known state
+    cache_info = []
+    for cache_key, entry in firms_api._firms_cache.items():
+        age_s = int(time.time() - entry["timestamp"])
+        cache_info.append({
+            "cache_key": cache_key,
+            "records": len(entry["data"]),
+            "is_demo": entry.get("is_demo", False),
+            "age_seconds": age_s,
+            "stale": age_s > firms_api.CACHE_TTL_SECONDS,
+        })
+
+    return {
+        "status": "ok",
+        "firms_key_present": api_key_present,
+        "firms_key_hint": "Set FIRMS_MAP_KEY env var from https://firms.modaps.eosdis.nasa.gov/api/map_key/" if not api_key_present else "Key is configured",
+        "cache_entries": cache_info,
+        "cache_ttl_seconds": firms_api.CACHE_TTL_SECONDS,
     }
 
 

@@ -9,6 +9,14 @@ https://firms.modaps.eosdis.nasa.gov/api/
 Supports normalized geographic caching (5-min TTL),
 strict India bounding box validation/clamping, polygon-based country filtering,
 request deduplication, stable unique IDs, and secure error surfacing.
+
+Key behaviours:
+- If FIRMS_MAP_KEY is absent → fall back to sample_hotspots.json (demo data),
+  clearly marked as is_demo_data=True.
+- If FIRMS_MAP_KEY is present but NASA returns an error → raise FIRMSFetchError
+  so the caller can surface a proper 502 instead of silently returning demo data.
+  This is intentional: a broken key should be visible, not hidden.
+- Demo fallback is ONLY used when the key is absent (key not configured).
 """
 
 import os
@@ -37,9 +45,17 @@ DEFAULT_AREA = f"{INDIA_WEST},{INDIA_SOUTH},{INDIA_EAST},{INDIA_NORTH}"
 
 SAMPLE_DATA_PATH = os.path.join(_base_dir, "sample_hotspots.json")
 
-# Geographic request-aware cache: normalized_key -> {"data": [...], "timestamp": float}
+# Geographic request-aware cache: normalized_key -> {"data": [...], "timestamp": float, "is_demo": bool}
 _firms_cache: dict[str, dict] = {}
 CACHE_TTL_SECONDS = 300  # 5 minutes
+
+
+class FIRMSFetchError(RuntimeError):
+    """Raised when FIRMS_MAP_KEY is present but NASA's API returns an error.
+    Caller should convert this to HTTP 502 and surface the message to the frontend.
+    Never expose the raw API key in the message — callers must sanitize before logging.
+    """
+    pass
 
 
 def _normalize_bounds(west: float, south: float, east: float, north: float, step: float = 0.25) -> tuple[float, float, float, float]:
@@ -63,18 +79,9 @@ def get_hotspots(
 ) -> list[dict]:
     """
     Returns a list of hotspot dictionaries strictly within India's territory.
-    [
-      {
-        "id": str,
-        "latitude": float,
-        "longitude": float,
-        "brightness": float,
-        "confidence": int,
-        "detected_at": str,
-        "is_demo_data": bool
-      },
-      ...
-    ]
+
+    Raises FIRMSFetchError if the API key is present but NASA's API returns an error.
+    Returns demo data (is_demo_data=True) only when no API key is configured.
     """
     global _firms_cache
 
@@ -90,8 +97,8 @@ def get_hotspots(
         clamped_n = min(north, INDIA_NORTH)
 
         if clamped_w >= clamped_e or clamped_s >= clamped_n:
-            print(f"[hotspots] viewport bbox: west={west}, south={south}, east={east}, north={north}")
-            print(f"[hotspots] Viewport outside India. Returning 0 hotspots.")
+            print(f"[FIRMS] viewport bbox: west={west}, south={south}, east={east}, north={north}")
+            print(f"[FIRMS] Viewport outside India. Returning 0 hotspots.")
             return []
 
         n_w, n_s, n_e, n_n = _normalize_bounds(clamped_w, clamped_s, clamped_e, clamped_n)
@@ -102,7 +109,10 @@ def get_hotspots(
         cache_key = f"india_default_{day_range}d"
         n_w, n_s, n_e, n_n = INDIA_WEST, INDIA_SOUTH, INDIA_EAST, INDIA_NORTH
 
-    api_key = os.getenv("FIRMS_MAP_KEY")
+    api_key = os.getenv("FIRMS_MAP_KEY", "").strip()
+    api_key_present = bool(api_key)
+
+    print(f"[FIRMS] Request started — key present: {api_key_present}, bbox: {area_str}, days: {day_range}")
 
     # 2. Check geographic cache
     now = time.time()
@@ -110,84 +120,103 @@ def get_hotspots(
         entry = _firms_cache[cache_key]
         if now - entry["timestamp"] < CACHE_TTL_SECONDS:
             cached_data = entry["data"]
-            print(f"[firms_api] Cache hit: {cache_key} ({len(cached_data)} hotspots)")
-            print(f"[hotspots] viewport bbox: west={west}, south={south}, east={east}, north={north}")
-            print(f"[hotspots] FIRMS bbox: {area_str}")
-            print(f"[hotspots] source: NASA FIRMS (VIIRS_SNPP_NRT, {day_range} days) [CACHED]")
-            print(f"[hotspots] records returned: {len(cached_data)}")
-            print(f"[hotspots] records after India filter: {len(cached_data)}")
-            print(f"[hotspots] records rendered: {len(cached_data)}")
-            print(f"[hotspots] demo data: False")
+            is_demo = entry.get("is_demo", False)
+            print(f"[FIRMS] Cache hit: {cache_key} ({len(cached_data)} hotspots, demo={is_demo})")
             return cached_data
         else:
             del _firms_cache[cache_key]
 
-    print(f"[firms_api] Cache miss: {cache_key}")
+    print(f"[FIRMS] Cache miss: {cache_key}")
 
-    # 3. Handle missing API key (explicit demo fallback for India)
-    if not api_key:
-        print("[firms_api] No FIRMS_MAP_KEY set, using sample data.")
+    # 3. Handle missing API key — ONLY case where demo fallback is acceptable
+    if not api_key_present:
+        print("[FIRMS] No FIRMS_MAP_KEY configured — serving sample_hotspots.json (demo data).")
         demo_data = _load_sample_data(n_w, n_s, n_e, n_n)
-        _firms_cache[cache_key] = {"data": demo_data, "timestamp": now}
-        print(f"[hotspots] source: sample_hotspots.json (demo data)")
-        print(f"[hotspots] records returned: {len(demo_data)}")
-        print(f"[hotspots] records after India filter: {len(demo_data)}")
-        print(f"[hotspots] demo data: True")
+        _firms_cache[cache_key] = {"data": demo_data, "timestamp": now, "is_demo": True}
+        print(f"[FIRMS] Demo records: {len(demo_data)}")
         return demo_data
 
-    # 4. Fetch real FIRMS data for this India geographic region
-    print(f"[hotspots] viewport bbox: west={west}, south={south}, east={east}, north={north}")
-    print(f"[hotspots] FIRMS bbox: {area_str}")
-    print(f"[hotspots] source: NASA FIRMS (VIIRS_SNPP_NRT, {day_range} days)")
+    # 4. Fetch real FIRMS data — raise FIRMSFetchError on any failure
+    safe_endpoint = (
+        f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/***"
+        f"/VIIRS_SNPP_NRT/{area_str}/{day_range}"
+    )
+    print(f"[FIRMS] Calling NASA endpoint: {safe_endpoint}")
 
     try:
         raw_data = _fetch_real_firms_data(api_key, area_str, day_range)
-        print(f"[hotspots] records returned: {len(raw_data)}")
+        print(f"[FIRMS] HTTP 200 OK — raw records: {len(raw_data)}")
 
-        # Second geographic validation: filter strictly to India mainland and island boundaries,
-        # removing points falling into neighboring countries or open ocean.
+        # Second geographic validation: filter strictly to India mainland and island boundaries
         filtered_data = [
             h for h in raw_data
             if india_boundary.is_inside_india(h["latitude"], h["longitude"])
         ]
-        print(f"[hotspots] records after India filter: {len(filtered_data)}")
-        print(f"[hotspots] records rendered: {len(filtered_data)}")
-        print(f"[hotspots] demo data: False")
+        print(f"[FIRMS] After India boundary filter: {len(filtered_data)} records")
+        print(f"[FIRMS] Parse successful: true — returning {len(filtered_data)} live hotspots")
 
-        _firms_cache[cache_key] = {"data": filtered_data, "timestamp": now}
-        print(f"[firms_api] Returning {len(filtered_data)} hotspots to frontend")
+        _firms_cache[cache_key] = {"data": filtered_data, "timestamp": now, "is_demo": False}
         return filtered_data
+
+    except FIRMSFetchError:
+        # Re-raise — caller (server.py) converts to HTTP 502
+        raise
+
     except Exception as error:
-        sanitized_error = str(error)
-        if api_key:
-            sanitized_error = sanitized_error.replace(api_key, "***")
-        print(f"[firms_api] NASA FIRMS request failed: {sanitized_error}. Falling back to demo data.")
-        demo_data = _load_sample_data(n_w, n_s, n_e, n_n)
-        _firms_cache[cache_key] = {"data": demo_data, "timestamp": now}
-        print(f"[hotspots] source: sample_hotspots.json (fallback)")
-        print(f"[hotspots] records returned: {len(demo_data)}")
-        print(f"[hotspots] records after India filter: {len(demo_data)}")
-        print(f"[hotspots] demo data: True")
-        return demo_data
+        sanitized_error = str(error).replace(api_key, "***") if api_key else str(error)
+        print(f"[FIRMS] Unexpected error: {sanitized_error}")
+        raise FIRMSFetchError(f"NASA FIRMS request failed: {sanitized_error}") from None
 
 
 def _fetch_real_firms_data(api_key: str, area_str: str, day_range: int = 3) -> list[dict]:
-    """Calls NASA FIRMS API for the specified India area string (west,south,east,north)."""
-    # VIIRS 375m sensor (NRT), day range (1-5)
+    """Calls NASA FIRMS API for the specified India area string (west,south,east,north).
+    Raises FIRMSFetchError on any HTTP or parse failure.
+    """
     url = (
         f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/"
         f"{api_key}/VIIRS_SNPP_NRT/{area_str}/{day_range}"
     )
+    safe_url = url.replace(api_key, "***")
 
-    response = requests.get(url, timeout=25)
-    response.raise_for_status()
+    try:
+        response = requests.get(url, timeout=30)
+    except requests.exceptions.Timeout:
+        raise FIRMSFetchError(
+            f"NASA FIRMS request timed out after 30s (endpoint: {safe_url})"
+        )
+    except requests.exceptions.ConnectionError as ce:
+        raise FIRMSFetchError(
+            f"NASA FIRMS connection error: {ce} (endpoint: {safe_url})"
+        )
+
+    if response.status_code == 400:
+        # Most common cause: invalid/expired API key
+        raise FIRMSFetchError(
+            f"NASA FIRMS returned HTTP 400 Bad Request — "
+            f"the FIRMS_MAP_KEY may be invalid, expired, or incorrectly formatted. "
+            f"Get a valid key at https://firms.modaps.eosdis.nasa.gov/api/map_key/ "
+            f"(endpoint: {safe_url})"
+        )
+
+    if not response.ok:
+        raise FIRMSFetchError(
+            f"NASA FIRMS returned HTTP {response.status_code} — "
+            f"response: {response.text[:200]} (endpoint: {safe_url})"
+        )
 
     # If response is HTML, the API key is invalid or rate limited
-    if response.text.strip().startswith("<"):
-        raise ValueError("NASA FIRMS returned HTML instead of CSV - API key may be invalid, rate-limited, or expired.")
+    body = response.text.strip()
+    if body.startswith("<"):
+        raise FIRMSFetchError(
+            "NASA FIRMS returned HTML instead of CSV — "
+            "API key may be invalid, rate-limited, or the service is down. "
+            f"(endpoint: {safe_url})"
+        )
+
+    print(f"[FIRMS] HTTP {response.status_code} — parsing CSV...")
 
     hotspots = []
-    csv_reader = csv.DictReader(io.StringIO(response.text))
+    csv_reader = csv.DictReader(io.StringIO(body))
 
     for row_index, row in enumerate(csv_reader):
         try:
@@ -195,11 +224,11 @@ def _fetch_real_firms_data(api_key: str, area_str: str, day_range: int = 3) -> l
             lon = float(row["longitude"])
             date_raw = row.get("acq_date", "").replace("-", "")
             time_raw = row.get("acq_time", "0000").zfill(4)
-            # Globally unique, stable identifier
             unique_id = f"firms-{lat:.4f}_{lon:.4f}_{date_raw}_{time_raw}_{row_index}"
 
             date_str = row.get("acq_date", "")
             time_str = row.get("acq_time", "0000").zfill(4)
+
             frp_val = None
             if row.get("frp"):
                 try:
@@ -252,6 +281,7 @@ def _fetch_real_firms_data(api_key: str, area_str: str, day_range: int = 3) -> l
         except (KeyError, ValueError):
             continue
 
+    print(f"[FIRMS] Parsed {len(hotspots)} valid hotspot records from CSV")
     return hotspots
 
 
@@ -267,7 +297,9 @@ def _parse_confidence(value):
 
 
 def _load_sample_data(west=None, south=None, east=None, north=None) -> list[dict]:
-    """Loads demo sample hotspots for India and filters to bounds if applicable."""
+    """Loads demo sample hotspots for India and filters to bounds if applicable.
+    All records are marked is_demo_data=True.
+    """
     if not os.path.exists(SAMPLE_DATA_PATH):
         return []
 
